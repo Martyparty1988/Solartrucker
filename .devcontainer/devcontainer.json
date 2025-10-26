@@ -1,0 +1,21 @@
+{
+  "name": "Solartrucker Codespace",
+  "image": "mcr.microsoft.com/vscode/devcontainers/javascript-node:0-18",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  },
+  "postCreateCommand": "npm install",
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "Solartrucker sync server",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "remoteUser": "vscode"
+}
