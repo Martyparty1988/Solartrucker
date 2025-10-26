@@ -1093,6 +1093,17 @@
         localStorage.setItem('solarTrackerEntries', JSON.stringify(state.workEntries));
         localStorage.setItem('solarTrackerMarkers', JSON.stringify(state.canvas.markers));
         localStorage.setItem('solarTrackerColorIndex', colorIndex.toString());
+        // update local state timestamp so we can resolve conflicts across devices
+        try {
+          const ts = Date.now();
+          localStorage.setItem('solarTrackerStateTs', ts.toString());
+        } catch (e) {
+          /* ignore storage errors */
+        }
+        // attempt to sync to server (best-effort, failures are ignored)
+        if (typeof syncWithServer === 'function') {
+          try { syncWithServer(); } catch (e) { /* ignore */ }
+        }
       } catch (e) {
         console.error('Error saving to localStorage:', e);
       }
@@ -2209,6 +2220,112 @@
     updateProjectSelectors();
     updateWorkerSelectors();
     updateWorkerLegend();
+  </script>
+  <!-- Client synchronization script: connects to server via WebSocket and REST to sync state across devices -->
+  <script>
+    (function(){
+      const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+      let ws = null;
+
+      function startSyncClient() {
+        try {
+          ws = new WebSocket(wsUrl);
+
+          ws.addEventListener('open', () => {
+            console.log('[sync] ws open');
+            // request current state from server via REST as well
+            fetch('/state').then(r => r.json()).then(remote => {
+              if (remote && remote.ts) mergeRemoteState(remote);
+            }).catch(() => {});
+          });
+
+          ws.addEventListener('message', (evt) => {
+            try {
+              const msg = JSON.parse(evt.data);
+              if (!msg) return;
+              if (msg.type === 'state' || msg.type === 'sync') {
+                mergeRemoteState(msg);
+              }
+            } catch (e) { console.warn('[sync] ws msg parse', e); }
+          });
+
+          ws.addEventListener('close', () => {
+            console.log('[sync] ws closed, retrying in 2s');
+            setTimeout(startSyncClient, 2000);
+          });
+
+          ws.addEventListener('error', (e) => {
+            console.warn('[sync] ws error', e);
+            ws.close();
+          });
+        } catch (e) {
+          console.warn('[sync] cannot start ws', e);
+        }
+      }
+
+      function mergeRemoteState(msg) {
+        // msg: { type, state, ts }
+        try {
+          const remoteTs = parseInt(msg.ts || 0, 10) || 0;
+          const localTs = parseInt(localStorage.getItem('solarTrackerStateTs') || '0', 10) || 0;
+          if (remoteTs > localTs) {
+            // adopt remote state (simple last-write-wins)
+            if (msg.state && typeof msg.state === 'object') {
+              // shallow replace of high-level state properties we use
+              ['projects','workers','workEntries','canvas'].forEach(k => {
+                if (msg.state[k] !== undefined) state[k] = msg.state[k];
+              });
+              // also accept any other top-level keys
+              Object.keys(msg.state).forEach(k => { if (!state.hasOwnProperty(k)) state[k] = msg.state[k]; });
+
+              // persist locally and re-render UI
+              try { localStorage.setItem('solarTrackerStateTs', remoteTs.toString()); } catch (e) {}
+              saveToStorage();
+              renderProjects();
+              renderWorkers();
+              renderRecords();
+              renderMarkers();
+              updateProjectSelectors();
+              updateWorkerSelectors();
+              updateWorkerLegend();
+              updateStatistics();
+              console.log('[sync] merged remote state ts=', remoteTs);
+            }
+          }
+        } catch (e) {
+          console.warn('[sync] merge error', e);
+        }
+      }
+
+      function syncWithServer() {
+        // best-effort: POST state to server and also send via ws
+        const payload = { state: {
+          projects: state.projects,
+          workers: state.workers,
+          workEntries: state.workEntries,
+          canvas: { markers: state.canvas.markers }
+        }, ts: Date.now() };
+
+        // update local ts
+        try { localStorage.setItem('solarTrackerStateTs', payload.ts.toString()); } catch (e) {}
+
+        fetch('/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).catch(() => {});
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'sync', state: payload.state, ts: payload.ts })); } catch (e) {}
+        }
+      }
+
+      // expose function for saveToStorage patch above
+      window.syncWithServer = syncWithServer;
+
+      // start ws client
+      startSyncClient();
+    })();
   </script>
 </body>
 </html>
